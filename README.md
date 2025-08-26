@@ -1,0 +1,1 @@
+pip install torch diffusers transformers accelerate pillow

@@ -1,0 +1,5 @@
+python-dotenv
+ollama
+pillow
+torch
+diffusers
