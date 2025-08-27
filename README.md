@@ -47,7 +47,28 @@
 - **Редактор** — проверяет логику, последовательность, устраняет противоречия
 
 > Агенты общаются между собой, как в живом диалоге.
-
+```mermaid
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+        __start__([<p>__start__</p>]):::first
+        narrator(narrator)
+        child(child)
+        editor(editor)
+        media(media)
+        __end__([<p>__end__</p>]):::last
+        __start__ --> narrator;
+        child --> editor;
+        editor --> media;
+        narrator --> child;
+        media --> __end__;
+        classDef default fill:#f2f0ff,line-height:1.2
+        classDef first fill-opacity:0
+        classDef last fill:#bfb6fc
+```
 ### 2. **Цепочки рассуждений (Chain-of-Thought)**
 Каждый агент сначала *думает*, потом отвечает:
 ```
