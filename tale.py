@@ -7,6 +7,8 @@ import torch
 from diffusers import AutoPipelineForText2Image, StableVideoDiffusionPipeline
 from diffusers.utils import export_to_video
 from dotenv import load_dotenv
+from typing import TypedDict, List, Dict, Any, Optional
+from langgraph.graph import StateGraph, END
 
 load_dotenv()
 
@@ -55,25 +57,7 @@ if args.generate_video:
     pipe_svd.to("cuda")
 
 
-# === Агенты через Ollama ===
-class Agent:
-    def __init__(self, name, system_prompt, model="qwen:14b-chat-q4_K_M"):
-        self.name = name
-        self.system_prompt = system_prompt
-        self.model = model
-
-    def respond(self, prompt):
-        response = ollama.generate(
-            model=self.model,
-            prompt=f"{self.system_prompt}\n\n{prompt}",
-            options={
-                'temperature': 0.6,
-                'top_p': 0.95,
-                'top_k': 30,
-                'num_ctx': 8192
-            }
-        )
-        return response['response'].strip()
+# === Диалоговые узлы будут реализованы через LangGraph ===
 
 
 # === Тема и этапы ===
@@ -155,7 +139,7 @@ PLOT_TEMPLATES = [
     }
 ]
 chosen_plot = random.choice(PLOT_TEMPLATES)
-print(f"\n{COLORS['Этап']}🎯 ТЕМА СКАЗКИ: {chosen_plot["название"]}{COLORS['ENDC']}\n")
+print(f"\n{COLORS['Этап']}🎯 ТЕМА СКАЗКИ: {chosen_plot['название']}{COLORS['ENDC']}\n")
 
 CAMPBELL_STAGES = [
     "1. Обычный мир",
@@ -170,17 +154,117 @@ CAMPBELL_STAGES = [
     "10. Возвращение с даром"
 ]
 
-# === Инициализация агентов ===
-narrator = Agent("Рассказчик", "Ты — волшебный рассказчик. Говори на русском, в стиле народной сказки.")
-child = Agent("Ребёнок", "Ты — ребёнок 7 лет. Реагируй по-русски: задавай вопросы, проси изменить.")
-editor = Agent("Редактор", "Ты — редактор. Проверяй логику сказки.")
+# === Состояние и граф LangGraph ===
+class TaleState(TypedDict, total=False):
+    stage: str
+    chosen_plot: Dict[str, Any]
+    history: List[Dict[str, str]]
+    full_tale: List[str]
+    pdf_timeline: List[Dict[str, Any]]
+    video_files: List[str]
+    tale_fragment: Optional[str]
+    child_resp: Optional[str]
+    editor_resp: Optional[str]
+    img_path: Optional[str]
 
-# === Хранение ===
-history = []
-full_tale = []
-video_files = []
-# Хронология для PDF в порядке, как в консоли
-pdf_timeline = []
+
+def call_ollama(system_prompt: str, user_prompt: str, model: str = "qwen:14b-chat-q4_K_M") -> str:
+    resp = ollama.generate(
+        model=model,
+        prompt=f"{system_prompt}\n\n{user_prompt}",
+        options={
+            'temperature': 0.6,
+            'top_p': 0.95,
+            'top_k': 30,
+            'num_ctx': 8192
+        }
+    )
+    return resp.get('response', '').strip()
+
+
+def narrator_node(state: TaleState) -> TaleState:
+    stage = state.get('stage', '')
+    chosen = state.get('chosen_plot')
+    recent = state.get('history', [])[-2:] if state.get('history') else 'начало'
+    stage_prompt = f"Расскажи этап сказки: {stage}. Тема: {chosen}. Учти: {recent}"
+    tale_fragment = call_ollama(
+        "Ты — волшебный рассказчик. Говори на русском, в стиле народной сказки.",
+        stage_prompt,
+    )
+    history = state.get('history', []) + [{"role": "Рассказчик", "content": tale_fragment}]
+    full_tale = state.get('full_tale', []) + [f"**{stage}**\n{tale_fragment}"]
+    pdf_timeline = state.get('pdf_timeline', []) + [
+        {"type": "header", "text": stage.upper()},
+        {"type": "agent", "role": "Рассказчик", "text": tale_fragment},
+        {"type": "story", "text": tale_fragment},
+    ]
+    print(f"\n{'=' * 70}")
+    print(f"{COLORS['Этап']}{stage.upper()}{COLORS['ENDC']}")
+    print(f"{'=' * 70}")
+    print(f"\n{COLORS['Рассказчик']}💬 {tale_fragment}{COLORS['ENDC']}")
+    return {
+        **state,
+        'tale_fragment': tale_fragment,
+        'history': history,
+        'full_tale': full_tale,
+        'pdf_timeline': pdf_timeline,
+    }
+
+
+def child_node(state: TaleState) -> TaleState:
+    tale_fragment = state.get('tale_fragment', '')
+    child_resp = call_ollama(
+        "Ты — ребёнок 7 лет. Реагируй по-русски: задавай вопросы, проси изменить.",
+        f"Ты услышал: {tale_fragment}...",
+    )
+    print(f"\n{COLORS['Ребёнок']}💬 {child_resp}{COLORS['ENDC']}")
+    history = state.get('history', []) + [{"role": "Ребёнок", "content": child_resp}]
+    pdf_timeline = state.get('pdf_timeline', []) + [{"type": "agent", "role": "Ребёнок", "text": child_resp}]
+    return {**state, 'child_resp': child_resp, 'history': history, 'pdf_timeline': pdf_timeline}
+
+
+def editor_node(state: TaleState) -> TaleState:
+    tale_fragment = state.get('tale_fragment', '')
+    editor_resp = call_ollama(
+        "Ты — редактор. Проверяй логику сказки.",
+        f"Проверь логику: {tale_fragment}",
+    )
+    print(f"\n{COLORS['Редактор']}💬 {editor_resp}{COLORS['ENDC']}")
+    history = state.get('history', []) + [{"role": "Редактор", "content": editor_resp}]
+    pdf_timeline = state.get('pdf_timeline', []) + [{"type": "agent", "role": "Редактор", "text": editor_resp}]
+    return {**state, 'editor_resp': editor_resp, 'history': history, 'pdf_timeline': pdf_timeline}
+
+
+def media_node(state: TaleState) -> TaleState:
+    stage = state.get('stage', '')
+    tale_fragment = state.get('tale_fragment', '')
+    print(f"\n{COLORS['Сказка']}📖 ТЕКСТ СКАЗКИ:{COLORS['ENDC']}")
+    print(f"{tale_fragment}\n")
+    img_filename = f"stage_{int(stage.split('.')[0])}.png" if stage else "stage_image.png"
+    img_path = generate_image(tale_fragment, img_filename)
+    pdf_timeline = state.get('pdf_timeline', []) + [{"type": "image", "path": img_path}]
+    video_files = state.get('video_files', [])
+    if args.generate_video:
+        video_filename = f"video_{img_filename.replace('.png', '.mp4')}"
+        video_path = generate_video(img_path, tale_fragment, f"static/{video_filename}")
+        if video_path:
+            video_files = video_files + [video_path]
+            pdf_timeline.append({"type": "video", "path": video_path})
+    return {**state, 'img_path': img_path, 'pdf_timeline': pdf_timeline, 'video_files': video_files}
+
+
+def build_graph():
+    graph = StateGraph(TaleState)
+    graph.add_node('narrator', narrator_node)
+    graph.add_node('child', child_node)
+    graph.add_node('editor', editor_node)
+    graph.add_node('media', media_node)
+    graph.set_entry_point('narrator')
+    graph.add_edge('narrator', 'child')
+    graph.add_edge('child', 'editor')
+    graph.add_edge('editor', 'media')
+    graph.add_edge('media', END)
+    return graph.compile(debug=False)
 
 
 # === Генерация изображения ===
@@ -233,63 +317,32 @@ def generate_video(image_path, prompt, output_path="video.mp4"):
     return output_path
 
 
-# === Основной цикл ===
+# === Оркестрация через LangGraph ===
+app = build_graph()
+state: TaleState = {
+    'chosen_plot': chosen_plot,
+    'history': [],
+    'full_tale': [],
+    'pdf_timeline': [],
+    'video_files': [],
+}
+
 for stage in CAMPBELL_STAGES:
-    print(f"\n{'=' * 70}")
-    print(f"{COLORS['Этап']}{stage.upper()}{COLORS['ENDC']}")
-    print(f"{'=' * 70}")
-
-    # PDF: заголовок этапа
-    pdf_timeline.append({"type": "header", "text": stage.upper()})
-
-    stage_prompt = f"Расскажи этап сказки: {stage}. Тема: {chosen_plot}. Учти: {history[-2:] if history else 'начало'}"
-    tale_fragment = narrator.respond(stage_prompt)
-    history.append({"role": "Рассказчик", "content": tale_fragment})
-    full_tale.append(f"**{stage}**\n{tale_fragment}")
-
-    # Диалог
-    print(f"\n{COLORS['Рассказчик']}💬 {tale_fragment}{COLORS['ENDC']}")
-    pdf_timeline.append({"type": "agent", "role": "Рассказчик", "text": tale_fragment})
-
-    child_resp = child.respond(f"Ты услышал: {tale_fragment}...")
-    print(f"\n{COLORS['Ребёнок']}💬 {child_resp}{COLORS['ENDC']}")
-    history.append({"role": "Ребёнок", "content": child_resp})
-    pdf_timeline.append({"type": "agent", "role": "Ребёнок", "text": child_resp})
-
-    editor_resp = editor.respond(f"Проверь логику: {tale_fragment}")
-    print(f"\n{COLORS['Редактор']}💬 {editor_resp}{COLORS['ENDC']}")
-    history.append({"role": "Редактор", "content": editor_resp})
-    pdf_timeline.append({"type": "agent", "role": "Редактор", "text": editor_resp})
-
-    # Вывод текста главы
-    print(f"\n{COLORS['Сказка']}📖 ТЕКСТ СКАЗКИ:{COLORS['ENDC']}")
-    print(f"{tale_fragment}\n")
-    pdf_timeline.append({"type": "story", "text": tale_fragment})
-
-    # Генерация и вывод картинки сразу
-    img_filename = f"stage_{CAMPBELL_STAGES.index(stage) + 1}.png"
-    img_path = generate_image(tale_fragment, img_filename)
-    pdf_timeline.append({"type": "image", "path": img_path})
-
-    # Генерация видео (опционально)
-    if args.generate_video:
-        video_filename = f"video_stage_{CAMPBELL_STAGES.index(stage) + 1}.mp4"
-        video_path = generate_video(img_path, tale_fragment, f"static/{video_filename}")
-        if video_path:
-            video_files.append(video_path)
+    state['stage'] = stage
+    state = app.invoke(state)
 
 # === Финал ===
 print(f"\n{'=' * 70}")
 print(f"{COLORS['Сказка']}📜 ПОЛНАЯ СКАЗКА{COLORS['ENDC']}")
 print(f"{'=' * 70}")
 
-for part in full_tale:
+for part in state.get('full_tale', []):
     print(f"\n{part}\n")
     print(f"{'-' * 50}")
 
-if args.generate_video:
+if args.generate_video and state.get('video_files'):
     print(f"\n{COLORS['Видео']}🎬 Видео сгенерированы:{COLORS['ENDC']}")
-    for v in video_files:
+    for v in state.get('video_files', []):
         print(f"→ {v}")
 
 # === Генерация PDF ===
@@ -315,7 +368,7 @@ def _wrap_text(draw, text, font, max_width):
     return lines
 
 
-def generate_pdf(timeline, output_path="static/tale.pdf"):
+def generate_pdf(timeline, video_files, output_path="static/tale.pdf"):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     # Страница A4 в пикселях (150 DPI): 1240x1754
@@ -456,6 +509,6 @@ def generate_pdf(timeline, output_path="static/tale.pdf"):
 
 # Сохранить PDF после вывода полной сказки
 try:
-    generate_pdf(pdf_timeline, output_path="static/tale.pdf")
+    generate_pdf(state.get('pdf_timeline', []), state.get('video_files', []), output_path="static/tale.pdf")
 except Exception as e:
     print(f"⚠️ Не удалось создать PDF: {e}")

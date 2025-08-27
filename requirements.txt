@@ -4,3 +4,4 @@ ollama
 pillow
 torch
 diffusers
+langgraph
