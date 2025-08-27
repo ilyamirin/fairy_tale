@@ -154,7 +154,9 @@ def media_node(state: TaleState) -> TaleState:
     print(f"\n{COLORS['Сказка']}📖 ТЕКСТ СКАЗКИ:{COLORS['ENDC']}")
     print(f"{tale_fragment}\n")
     img_filename = f"stage_{int(stage.split('.')[0])}.png" if stage else "stage_image.png"
-    img_path = generate_image(tale_fragment, img_filename)
+    # Use only the last 50 words of the tale fragment for image generation
+    tale_last_50 = " ".join(tale_fragment.split()[-50:]) if tale_fragment else ""
+    img_path = generate_image(tale_last_50, img_filename)
     pdf_timeline = state.get('pdf_timeline', []) + [{"type": "image", "path": img_path}]
     video_files = state.get('video_files', [])
     if args.generate_video:
@@ -177,15 +179,14 @@ def build_graph():
     graph.add_edge('child', 'editor')
     graph.add_edge('editor', 'media')
     graph.add_edge('media', END)
-    return graph.compile(debug=True)
+    return graph.compile(debug=False)
 
 
 # === Генерация изображения ===
 def generate_image(prompt, filename="stage_image.png"):
-    short_prompt = " ".join(prompt.split(" ")[:50])  # Первые 50 слов
     full_prompt = (
-        f"Акварельная иллюстрация в стиле импрессионизма, русская народная сказка — {short_prompt}. "
-        "Impressionist watercolor, dreamy light, Russian fairy tale, 4k"
+        f"Акварельная иллюстрация в стиле импрессионизма, народная сказка — {prompt}. "
+        "Impressionist watercolor, dreamy light, fairy tale, 4k"
     )
     image = pipe_sdxl(prompt=full_prompt, num_inference_steps=4, guidance_scale=0.0).images[0]
 
